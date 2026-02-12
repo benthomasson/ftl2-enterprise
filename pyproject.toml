@@ -11,6 +11,7 @@ requires-python = ">=3.13"
 authors = [{ name = "Ben" }]
 dependencies = [
     "ftl2 @ git+https://github.com/benthomasson/ftl2",
+    "ftl2-ai-loop @ git+https://github.com/benthomasson/ftl2-ai-loop",
     "sqlalchemy>=2.0.0",
 ]
 
