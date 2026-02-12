@@ -36,6 +36,9 @@ def cli():
     run_parser.add_argument("--rules-dir", default="rules", help="Rules directory")
     run_parser.add_argument("--plan-file", help="Saved plan file (incremental mode)")
 
+    # --- tui ---
+    subparsers.add_parser("tui", help="Launch the dashboard TUI")
+
     # --- status ---
     status_parser = subparsers.add_parser("status", help="Show loop status")
     status_parser.add_argument("--all", action="store_true",
@@ -75,6 +78,11 @@ def cli():
             rules_dir=args.rules_dir,
             plan_file=args.plan_file,
         )
+        return
+
+    if args.command == "tui":
+        from .tui import run_tui
+        run_tui(db_path=args.db)
         return
 
     if args.command == "status":
