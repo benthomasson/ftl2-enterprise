@@ -18,16 +18,27 @@ The dashboard is a detachable view, like tmux.
 
 | File | Purpose |
 |------|---------|
-| `__init__.py` | CLI entry point — `cli()` parses args, `--init-db` creates tables |
+| `__init__.py` | CLI entry point — subcommands: `init-db`, `run`, `status`, `history` |
 | `schema.py` | SQLAlchemy Core table definitions — all 8 tables as `Table` objects |
 | `db.py` | `create_db()` — creates engine with WAL mode and foreign keys enabled |
+| `store.py` | Data access layer — insert/query helpers for all tables |
+| `worker.py` | Loop worker — wraps ftl2-ai-loop's `reconcile()` with DB writes |
 
 ### Key Functions
 
 | Function | Location | Purpose |
 |----------|----------|---------|
-| `cli()` | `__init__.py` | Argparse + DB initialization |
+| `cli()` | `__init__.py` | Argparse with subcommands, dispatches to worker or query commands |
 | `create_db(path)` | `db.py` | Creates SQLite engine with WAL mode, runs `metadata.create_all()` |
+| `create_loop(engine, ...)` | `store.py` | Insert a new loop row, returns loop ID |
+| `insert_iteration(engine, ...)` | `store.py` | Record an observe → decide → execute cycle |
+| `insert_action(engine, ...)` | `store.py` | Record a module execution with rc/stdout/stderr |
+| `insert_prompt(engine, ...)` | `store.py` | Record a pending human-in-the-loop prompt |
+| `list_loops(engine, status)` | `store.py` | Query loops, optionally filtered by status |
+| `get_iterations(engine, loop_id)` | `store.py` | Get all iterations for a loop |
+| `get_actions_for_loop(engine, loop_id)` | `store.py` | Get all actions across all iterations |
+| `run_loop(...)` | `worker.py` | Async entry point — creates loop, calls reconcile(), writes history to DB |
+| `run(...)` | `worker.py` | Sync wrapper — calls `asyncio.run(run_loop(...))` |
 
 ## Database Schema
 
@@ -58,19 +69,30 @@ No environment variables or config files. The database path is the only configur
 ## Running
 
 ```bash
-# Initialize the database
-ftl2-enterprise --init-db
+# Via uvx from GitHub (no install)
+uvx --from "git+https://github.com/benthomasson/ftl2-enterprise" \
+    ftl2-enterprise init-db
 
-# With custom DB path
-ftl2-enterprise --db /var/lib/ftl2/loops.db --init-db
+# Local development
+pip install -e .
+ftl2-enterprise init-db
+
+# Run a loop
+ftl2-enterprise run "Install nginx" -i inventory.yml
+
+# Query results
+ftl2-enterprise status --all
+ftl2-enterprise history 1 --actions
 ```
 
 ## Key Files
 
 ```
 ftl2_enterprise/
-├── __init__.py     # CLI entry point
+├── __init__.py     # CLI entry point with subcommands
 ├── db.py           # Database creation with WAL mode
-└── schema.py       # SQLAlchemy Core table definitions
+├── schema.py       # SQLAlchemy Core table definitions
+├── store.py        # Data access layer (insert/query helpers)
+└── worker.py       # Loop worker (wraps ftl2-ai-loop with DB writes)
 pyproject.toml      # Hatchling build, Python >=3.13, Apache-2.0
 ```
