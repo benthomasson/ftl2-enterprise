@@ -8,6 +8,7 @@ Refreshes on a timer — no worker thread needed.
 import json
 
 from rich.console import Group
+from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
@@ -303,6 +304,237 @@ class PickPromptScreen(ModalScreen[dict | None]):
         self.dismiss(None)
 
 
+class PickLoopScreen(ModalScreen[int | None]):
+    """Modal for choosing which loop to view."""
+
+    DEFAULT_CSS = """
+    PickLoopScreen {
+        align: center middle;
+    }
+
+    PickLoopScreen > Vertical {
+        width: 70;
+        height: auto;
+        border: thick $background 80%;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    PickLoopScreen #title-label {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    PickLoopScreen Select {
+        width: 100%;
+        margin-bottom: 1;
+    }
+
+    PickLoopScreen #buttons {
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+    }
+
+    PickLoopScreen #buttons Button {
+        margin-right: 1;
+    }
+    """
+
+    def __init__(self, options: list[tuple[str, int]]):
+        super().__init__()
+        self._options = options
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("Select a loop to view:", id="title-label")
+            yield Select(self._options, id="loop-select")
+            with Horizontal(id="buttons"):
+                yield Button("View", id="view", variant="primary")
+                yield Button("Cancel", id="cancel")
+
+    @on(Button.Pressed, "#view")
+    def handle_view(self) -> None:
+        selected = self.query_one("#loop-select", Select).value
+        if selected is not None:
+            self.dismiss(selected)
+        else:
+            self.dismiss(None)
+
+    @on(Button.Pressed, "#cancel")
+    def handle_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class LoopDetailScreen(ModalScreen[None]):
+    """Full-screen detail view for a single loop."""
+
+    DEFAULT_CSS = """
+    LoopDetailScreen {
+        align: center middle;
+    }
+
+    LoopDetailScreen > Vertical {
+        width: 100%;
+        height: 100%;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    LoopDetailScreen #detail-header {
+        width: 100%;
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    LoopDetailScreen #detail-content {
+        height: 1fr;
+        overflow-y: auto;
+    }
+
+    LoopDetailScreen #detail-bar {
+        height: 1;
+        dock: bottom;
+        background: $primary-background;
+        color: $text;
+        padding: 0 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "go_back", "Back", show=True),
+        Binding("q", "go_back", "Back", show=False),
+    ]
+
+    def __init__(self, engine, loop_id: int):
+        super().__init__()
+        self._engine = engine
+        self._loop_id = loop_id
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static("", id="detail-header")
+            yield Static("Loading...", id="detail-content")
+            yield Static("ESC: back", id="detail-bar")
+
+    def on_mount(self) -> None:
+        self._refresh_detail()
+        self.set_interval(2.0, self._refresh_detail)
+
+    def action_go_back(self) -> None:
+        self.dismiss(None)
+
+    def _refresh_detail(self) -> None:
+        loop = store.get_loop(self._engine, self._loop_id)
+        if not loop:
+            self.query_one("#detail-header", Static).update("Loop not found")
+            return
+
+        # Header
+        status = loop.get("status", "")
+        status_style = {
+            "running": "bold green",
+            "completed": "blue",
+            "failed": "bold red",
+            "pending": "yellow",
+            "paused": "bold yellow",
+        }.get(status, "")
+
+        header_text = Text()
+        header_text.append(f"Loop #{loop['id']}", style="bold")
+        header_text.append("  ")
+        header_text.append(status, style=status_style)
+        header_text.append(f"  {loop.get('mode', '')}")
+        header_text.append(f"\n{loop.get('desired_state', '')}")
+
+        self.query_one("#detail-header", Static).update(
+            Panel(header_text, title="Loop Detail", border_style="dim")
+        )
+
+        # Content: iterations and actions
+        renderables = []
+        iters = store.get_iterations(self._engine, self._loop_id)
+
+        if not iters:
+            renderables.append(Text("No iterations yet.", style="dim"))
+        else:
+            for it in iters:
+                iter_n = it["n"]
+                converged = bool(it.get("converged"))
+                reasoning = it.get("reasoning") or ""
+
+                # Iteration header
+                if converged:
+                    iter_title = f"Iteration {iter_n + 1} — converged"
+                    iter_style = "green"
+                else:
+                    iter_title = f"Iteration {iter_n + 1}"
+                    iter_style = "dim"
+
+                iter_parts = []
+
+                if reasoning:
+                    iter_parts.append(Text(f"Reasoning: {reasoning}", style="italic"))
+
+                # Actions table for this iteration
+                iter_actions = store.get_actions_for_iteration(self._engine, it["id"])
+                if iter_actions:
+                    action_table = Table(expand=True, show_header=True, padding=(0, 1))
+                    action_table.add_column("Module", width=20)
+                    action_table.add_column("Host", width=15)
+                    action_table.add_column("Status", width=10)
+                    action_table.add_column("RC", width=5, justify="right")
+                    action_table.add_column("Output")
+
+                    for a in iter_actions:
+                        a_status = a.get("status", "")
+                        if a_status == "completed":
+                            status_text = Text(a_status, style="green")
+                        elif a_status == "failed":
+                            status_text = Text(a_status, style="bold red")
+                        else:
+                            status_text = Text(a_status)
+
+                        rc = str(a["rc"]) if a.get("rc") is not None else ""
+                        stdout = (a.get("stdout") or "").strip()
+                        stderr = (a.get("stderr") or "").strip()
+                        output = stdout or stderr or ""
+                        if len(output) > 80:
+                            output = output[:80] + "..."
+
+                        action_table.add_row(
+                            a.get("module", ""),
+                            a.get("host", "") or "",
+                            status_text,
+                            rc,
+                            output,
+                        )
+
+                    iter_parts.append(action_table)
+                elif not converged:
+                    iter_parts.append(Text("No actions", style="dim"))
+
+                if iter_parts:
+                    content = Group(*iter_parts)
+                else:
+                    content = Text("converged", style="green")
+
+                renderables.append(Panel(
+                    content,
+                    title=iter_title,
+                    title_align="left",
+                    border_style=iter_style,
+                ))
+
+        self.query_one("#detail-content", Static).update(Group(*renderables))
+
+        # Status bar
+        total_actions = store.count_actions(self._engine, self._loop_id)
+        self.query_one("#detail-bar", Static).update(
+            f"{len(iters)} iterations | {total_actions} actions | ESC: back"
+        )
+
+
 # --- Main App ---
 
 
@@ -328,6 +560,7 @@ class EnterpriseApp(App):
         Binding("q", "quit_app", "Quit", show=True),
         Binding("s", "submit_loop", "Submit", show=True),
         Binding("r", "respond_prompt", "Respond", show=True),
+        Binding("enter", "view_loop", "View", show=True),
     ]
 
     def __init__(self, db_path: str):
@@ -369,6 +602,33 @@ class EnterpriseApp(App):
                     self._open_respond(prompt_data)
 
             self.push_screen(PickPromptScreen(pending), on_pick)
+
+    def action_view_loop(self) -> None:
+        all_loops = store.list_loops(self._engine)
+        if not all_loops:
+            self.notify("No loops to view", severity="warning")
+            return
+
+        if len(all_loops) == 1:
+            self._open_detail(all_loops[0]["id"])
+        else:
+            options = []
+            for loop in all_loops:
+                status = loop.get("status", "")
+                name = loop.get("name", "")
+                if len(name) > 40:
+                    name = name[:40] + "..."
+                label = f"#{loop['id']} [{status}] {name}"
+                options.append((label, loop["id"]))
+
+            def on_pick(loop_id: int | None) -> None:
+                if loop_id is not None:
+                    self._open_detail(loop_id)
+
+            self.push_screen(PickLoopScreen(options), on_pick)
+
+    def _open_detail(self, loop_id: int) -> None:
+        self.push_screen(LoopDetailScreen(self._engine, loop_id))
 
     def _open_respond(self, prompt_data: dict) -> None:
         def on_respond(submitted: bool) -> None:
