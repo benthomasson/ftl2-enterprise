@@ -1,5 +1,4 @@
 import argparse
-import json
 import sys
 
 from .db import create_db
@@ -35,6 +34,25 @@ def cli():
     run_parser.add_argument("--environment", default="", help="Environment name")
     run_parser.add_argument("--rules-dir", default="rules", help="Rules directory")
     run_parser.add_argument("--plan-file", help="Saved plan file (incremental mode)")
+
+    # --- worker ---
+    worker_parser = subparsers.add_parser("worker", help="Run the long-running worker daemon")
+    worker_parser.add_argument("--poll-interval", type=float, default=5.0,
+                                help="Seconds between poll cycles (default: 5.0)")
+
+    # --- submit ---
+    submit_parser = subparsers.add_parser("submit", help="Submit a new loop for the worker")
+    submit_parser.add_argument("desired_state", help="Desired state description")
+    submit_parser.add_argument("-i", "--inventory", help="Inventory file path")
+    submit_parser.add_argument("--mode", choices=["single", "incremental", "continuous"],
+                                default="single", help="Loop mode (default: single)")
+    submit_parser.add_argument("--interval", type=int, default=60,
+                                help="Delay between runs in continuous/incremental mode (default: 60)")
+
+    # --- respond ---
+    respond_parser = subparsers.add_parser("respond", help="Respond to a pending prompt")
+    respond_parser.add_argument("prompt_id", type=int, help="Prompt ID")
+    respond_parser.add_argument("response", help="Response text")
 
     # --- tui ---
     subparsers.add_parser("tui", help="Launch the dashboard TUI")
@@ -78,6 +96,19 @@ def cli():
             rules_dir=args.rules_dir,
             plan_file=args.plan_file,
         )
+        return
+
+    if args.command == "worker":
+        from .worker import worker
+        worker(db_path=args.db, poll_interval=args.poll_interval)
+        return
+
+    if args.command == "submit":
+        _cmd_submit(args)
+        return
+
+    if args.command == "respond":
+        _cmd_respond(args)
         return
 
     if args.command == "tui":
@@ -165,3 +196,27 @@ def _cmd_history(args):
 
     total = store.count_actions(engine, args.loop_id)
     print(f"\nTotal: {len(iters)} iterations, {total} actions")
+
+
+def _cmd_submit(args):
+    from . import store
+
+    engine = create_db(args.db)
+    loop_id = store.create_loop(
+        engine,
+        name=args.desired_state[:80],
+        desired_state=args.desired_state,
+        mode=args.mode,
+        inventory=args.inventory,
+        interval=args.interval if args.mode != "single" else None,
+    )
+    print(f"Loop #{loop_id} submitted (status: pending)")
+    print(f"The worker will pick it up on its next poll cycle.")
+
+
+def _cmd_respond(args):
+    from . import store
+
+    engine = create_db(args.db)
+    store.record_response(engine, args.prompt_id, args.response)
+    print(f"Response recorded for prompt #{args.prompt_id}")

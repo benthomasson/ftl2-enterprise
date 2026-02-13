@@ -239,6 +239,73 @@ def get_pending_prompts(engine: Engine, loop_id: int | None = None) -> list[dict
         return [dict(row._mapping) for row in rows]
 
 
+def get_last_iteration_number(engine: Engine, loop_id: int) -> int:
+    """Get the highest iteration number for a loop, or -1 if none."""
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(func.max(iterations.c.n))
+            .where(iterations.c.loop_id == loop_id)
+        ).fetchone()
+        return row[0] if row[0] is not None else -1
+
+
+def get_history_for_ai(engine: Engine, loop_id: int) -> list[dict]:
+    """Rebuild the history list in the format that decide() expects.
+
+    Returns a list of dicts matching ai-loop's in-memory history format:
+        {"iteration": int, "reasoning": str, "actions": [...], "results": [...], ...}
+    """
+    history = []
+    iters = get_iterations(engine, loop_id)
+    for it in iters:
+        iter_actions = get_actions_for_iteration(engine, it["id"])
+
+        # Rebuild actions and results in ai-loop's format
+        ai_actions = []
+        ai_results = []
+        for a in iter_actions:
+            params = json.loads(a["params"]) if a.get("params") else {}
+            ai_actions.append({
+                "module": a["module"],
+                "params": params,
+            })
+            result_data = {}
+            if a.get("rc") is not None:
+                result_data["rc"] = a["rc"]
+            if a.get("stdout"):
+                result_data["stdout"] = a["stdout"]
+            if a.get("stderr"):
+                result_data["stderr"] = a["stderr"]
+            if a.get("changed") is not None:
+                result_data["changed"] = bool(a["changed"])
+            if a.get("status") == "failed":
+                result_data["failed"] = True
+            ai_results.append({
+                "module": a["module"],
+                "result": result_data,
+            })
+
+        entry = {
+            "iteration": it["n"],
+            "reasoning": it.get("reasoning") or "",
+            "converged": bool(it.get("converged")),
+            "actions": ai_actions,
+            "results": ai_results,
+        }
+        history.append(entry)
+    return history
+
+
+def pause_loop(engine: Engine, loop_id: int):
+    """Mark a loop as paused."""
+    with engine.begin() as conn:
+        conn.execute(
+            loops.update().where(loops.c.id == loop_id).values(
+                status="paused",
+            )
+        )
+
+
 def count_actions(engine: Engine, loop_id: int) -> int:
     """Count total actions for a loop."""
     with engine.connect() as conn:
