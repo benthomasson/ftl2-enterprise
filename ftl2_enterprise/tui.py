@@ -17,7 +17,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, Horizontal
 from textual.screen import ModalScreen
-from textual.widgets import Header, Static, Input, Button, Select, Label
+from textual.widgets import Header, Static, Input, Button, Select, Label, DataTable
 
 from .db import create_db
 from . import store
@@ -304,68 +304,6 @@ class PickPromptScreen(ModalScreen[dict | None]):
         self.dismiss(None)
 
 
-class PickLoopScreen(ModalScreen[int | None]):
-    """Modal for choosing which loop to view."""
-
-    DEFAULT_CSS = """
-    PickLoopScreen {
-        align: center middle;
-    }
-
-    PickLoopScreen > Vertical {
-        width: 70;
-        height: auto;
-        border: thick $background 80%;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    PickLoopScreen #title-label {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-
-    PickLoopScreen Select {
-        width: 100%;
-        margin-bottom: 1;
-    }
-
-    PickLoopScreen #buttons {
-        width: 100%;
-        height: auto;
-        margin-top: 1;
-    }
-
-    PickLoopScreen #buttons Button {
-        margin-right: 1;
-    }
-    """
-
-    def __init__(self, options: list[tuple[str, int]]):
-        super().__init__()
-        self._options = options
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Label("Select a loop to view:", id="title-label")
-            yield Select(self._options, id="loop-select")
-            with Horizontal(id="buttons"):
-                yield Button("View", id="view", variant="primary")
-                yield Button("Cancel", id="cancel")
-
-    @on(Button.Pressed, "#view")
-    def handle_view(self) -> None:
-        selected = self.query_one("#loop-select", Select).value
-        if selected is not None:
-            self.dismiss(selected)
-        else:
-            self.dismiss(None)
-
-    @on(Button.Pressed, "#cancel")
-    def handle_cancel(self) -> None:
-        self.dismiss(None)
-
-
 class LoopDetailScreen(ModalScreen[None]):
     """Full-screen detail view for a single loop."""
 
@@ -543,9 +481,13 @@ class EnterpriseApp(App):
 
     TITLE = "ftl2-enterprise"
     CSS = """
-    #dashboard {
+    #loops-table {
         height: 1fr;
-        overflow-y: auto;
+        border: solid $primary-background;
+    }
+    #prompts-area {
+        height: auto;
+        max-height: 30%;
     }
     #status-bar {
         height: 1;
@@ -560,7 +502,6 @@ class EnterpriseApp(App):
         Binding("q", "quit_app", "Quit", show=True),
         Binding("s", "submit_loop", "Submit", show=True),
         Binding("r", "respond_prompt", "Respond", show=True),
-        Binding("enter", "view_loop", "View", show=True),
     ]
 
     def __init__(self, db_path: str):
@@ -570,7 +511,10 @@ class EnterpriseApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Static("Loading...", id="dashboard")
+        table = DataTable(id="loops-table", cursor_type="row", zebra_stripes=True)
+        table.add_columns("ID", "Status", "Mode", "Iters", "Actions", "Created", "Name")
+        yield table
+        yield Static("", id="prompts-area")
         yield Static("", id="status-bar")
 
     def on_mount(self) -> None:
@@ -603,31 +547,12 @@ class EnterpriseApp(App):
 
             self.push_screen(PickPromptScreen(pending), on_pick)
 
-    def action_view_loop(self) -> None:
-        all_loops = store.list_loops(self._engine)
-        if not all_loops:
-            self.notify("No loops to view", severity="warning")
+    @on(DataTable.RowSelected, "#loops-table")
+    def on_loop_selected(self, event: DataTable.RowSelected) -> None:
+        try:
+            loop_id = int(event.row_key.value)
+        except (TypeError, ValueError):
             return
-
-        if len(all_loops) == 1:
-            self._open_detail(all_loops[0]["id"])
-        else:
-            options = []
-            for loop in all_loops:
-                status = loop.get("status", "")
-                name = loop.get("name", "")
-                if len(name) > 40:
-                    name = name[:40] + "..."
-                label = f"#{loop['id']} [{status}] {name}"
-                options.append((label, loop["id"]))
-
-            def on_pick(loop_id: int | None) -> None:
-                if loop_id is not None:
-                    self._open_detail(loop_id)
-
-            self.push_screen(PickLoopScreen(options), on_pick)
-
-    def _open_detail(self, loop_id: int) -> None:
         self.push_screen(LoopDetailScreen(self._engine, loop_id))
 
     def _open_respond(self, prompt_data: dict) -> None:
@@ -642,60 +567,48 @@ class EnterpriseApp(App):
         all_loops = store.list_loops(self._engine)
         pending_prompts = store.get_pending_prompts(self._engine)
 
-        dashboard = self.query_one("#dashboard", Static)
+        loops_table = self.query_one("#loops-table", DataTable)
+        prompts_area = self.query_one("#prompts-area", Static)
         status_bar = self.query_one("#status-bar", Static)
 
-        if not all_loops and not pending_prompts:
-            dashboard.update("No loops found. Press 's' to submit a new loop.")
-            status_bar.update("0 loops | s:submit")
-            return
+        # Save cursor position before clearing
+        cursor_row = loops_table.cursor_row
 
-        renderables = []
+        # Update loops table
+        loops_table.clear()
 
-        # Loops table
-        if all_loops:
-            table = Table(expand=True, title="Loops")
-            table.add_column("ID", style="dim", width=5, justify="right")
-            table.add_column("Status", width=10)
-            table.add_column("Mode", width=12)
-            table.add_column("Iters", width=6, justify="right")
-            table.add_column("Actions", width=8, justify="right")
-            table.add_column("Created", width=20)
-            table.add_column("Name")
+        for loop in all_loops:
+            status = loop.get("status", "")
+            status_styles = {
+                "running": "bold green",
+                "completed": "blue",
+                "failed": "bold red",
+                "pending": "yellow",
+                "paused": "bold yellow",
+            }
+            style_status = Text(status, style=status_styles.get(status, ""))
 
-            for loop in all_loops:
-                status = loop.get("status", "")
-                if status == "running":
-                    style_status = Text(status, style="bold green")
-                elif status == "completed":
-                    style_status = Text(status, style="blue")
-                elif status == "failed":
-                    style_status = Text(status, style="bold red")
-                elif status == "pending":
-                    style_status = Text(status, style="yellow")
-                elif status == "paused":
-                    style_status = Text(status, style="bold yellow")
-                else:
-                    style_status = Text(status)
+            loop_id = loop["id"]
+            iters = store.get_iterations(self._engine, loop_id)
+            action_count = store.count_actions(self._engine, loop_id)
+            created = (loop.get("created_at") or "")[:19]
 
-                loop_id = loop["id"]
-                iters = store.get_iterations(self._engine, loop_id)
-                action_count = store.count_actions(self._engine, loop_id)
-                created = (loop.get("created_at") or "")[:19]
+            loops_table.add_row(
+                str(loop_id),
+                style_status,
+                loop.get("mode", ""),
+                str(len(iters)),
+                str(action_count),
+                created,
+                loop.get("name", ""),
+                key=str(loop_id),
+            )
 
-                table.add_row(
-                    str(loop_id),
-                    style_status,
-                    loop.get("mode", ""),
-                    str(len(iters)),
-                    str(action_count),
-                    created,
-                    loop.get("name", ""),
-                )
+        # Restore cursor position
+        if all_loops and cursor_row < len(all_loops):
+            loops_table.move_cursor(row=cursor_row)
 
-            renderables.append(table)
-
-        # Pending prompts table
+        # Pending prompts
         if pending_prompts:
             prompt_table = Table(
                 expand=True,
@@ -721,10 +634,9 @@ class EnterpriseApp(App):
                     created,
                 )
 
-            renderables.append(Text())  # spacer
-            renderables.append(prompt_table)
-
-        dashboard.update(Group(*renderables))
+            prompts_area.update(prompt_table)
+        else:
+            prompts_area.update("")
 
         # Status bar counts
         running = sum(1 for l in all_loops if l.get("status") == "running")
